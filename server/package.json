@@ -1,3 +1,17 @@
 {
-  "name":"@zyvox/server","private":true,"version":"0.1.0","type":"module","scripts":{"dev":"node --watch src/index.js","start":"node src/index.js"},"dependencies":{"@whiskeysockets/baileys":"latest","cors":"latest","express":"latest","pino":"latest"}
+  "name": "@zyvox/server",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "latest",
+    "cors": "latest",
+    "express": "latest",
+    "pino": "latest",
+    "qrcode": "latest"
+  }
 }

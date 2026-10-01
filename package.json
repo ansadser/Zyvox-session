@@ -1,6 +1,0 @@
-{
-  "name": "zyvox-session",
-  "private": true,
-  "version": "0.1.0",
-  "scripts": {"dev:server":"npm --prefix server run dev","start:server":"npm --prefix server start","dev:web":"npm --prefix web run dev","build:web":"npm --prefix web run build"}
-}
