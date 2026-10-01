@@ -19,10 +19,8 @@ const port = Number(process.env.PORT || 3000);
 const sessionsDir = path.resolve(process.env.SESSIONS_DIR || "./sessions");
 const logger = P({ level: process.env.LOG_LEVEL || "info" });
 const sessions = new Map();
-const encryptionSecret = process.env.SESSION_ENCRYPTION_KEY || "";
-const encryptionKey = encryptionSecret
-  ? crypto.scryptSync(encryptionSecret, "zyvox-session-auth-v1", 32)
-  : null;
+const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false }) : null;
+const sessionEncryptionKey = process.env.SESSION_ENCRYPTION_KEY || "";
 
 app.use(cors({
   origin: process.env.CORS_ORIGIN || "*",
@@ -57,31 +55,41 @@ async function initDb() {
   `);
 }
 
-function encryptionKey() {
+function getEncryptionKey() {
   if (!sessionEncryptionKey) return null;
-  return crypto.createHash("sha256").update(sessionEncryptionKey).digest();
+  return crypto.scryptSync(sessionEncryptionKey, "zyvox-session-auth-v1", 32);
 }
 
-function encryptText(text) {
-  const key = encryptionKey();
+function encryptAuth(text) {
+  const key = getEncryptionKey();
   if (!key) return null;
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
   const encrypted = Buffer.concat([cipher.update(text, "utf8"), cipher.final()]);
-  return Buffer.concat([iv, cipher.getAuthTag(), encrypted]).toString("base64");
+  return {
+    payload: encrypted.toString("base64"),
+    iv: iv.toString("base64"),
+    authTag: cipher.getAuthTag().toString("base64")
+  };
 }
 
-function decryptText(payload) {
-  const key = encryptionKey();
+function decryptAuth(row) {
+  const key = getEncryptionKey();
   if (!key) return null;
-  const raw = Buffer.from(payload, "base64");
-  const decipher = crypto.createDecipheriv("aes-256-gcm", key, raw.subarray(0, 12));
-  decipher.setAuthTag(raw.subarray(12, 28));
-  return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8");
+  const decipher = crypto.createDecipheriv(
+    "aes-256-gcm",
+    key,
+    Buffer.from(row.iv, "base64")
+  );
+  decipher.setAuthTag(Buffer.from(row.auth_tag, "base64"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(row.payload, "base64")),
+    decipher.final()
+  ]).toString("utf8");
 }
 
 async function snapshotAuth(session) {
-  if (!pool || !encryptionKey) return;
+  if (!pool || !getEncryptionKey()) return;
   const authPath = path.join(sessionsDir, session.id);
   const files = {};
   let entries = [];
@@ -111,14 +119,16 @@ async function snapshotAuth(session) {
 }
 
 async function restoreAuth(session) {
-  if (!pool || !encryptionKey) return false;
+  if (!pool || !getEncryptionKey()) return false;
   const { rows } = await pool.query(
     "SELECT payload, iv, auth_tag FROM session_auth WHERE session_id = $1",
     [session.id]
   );
   if (!rows.length) return false;
 
-  const files = JSON.parse(decryptAuth(rows[0]));
+  const decrypted = decryptAuth(rows[0]);
+  if (!decrypted) return false;
+  const files = JSON.parse(decrypted);
   const authPath = path.join(sessionsDir, session.id);
   await fs.mkdir(authPath, { recursive: true });
 
