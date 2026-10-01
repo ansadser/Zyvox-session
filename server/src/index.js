@@ -19,11 +19,6 @@ const port = Number(process.env.PORT || 3000);
 const sessionsDir = path.resolve(process.env.SESSIONS_DIR || "./sessions");
 const logger = P({ level: process.env.LOG_LEVEL || "info" });
 const sessions = new Map();
-const sessionEncryptionKey = process.env.SESSION_ENCRYPTION_KEY || "";
-const pool = process.env.DATABASE_URL
-  ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } })
-  : null;
-
 const encryptionSecret = process.env.SESSION_ENCRYPTION_KEY || "";
 const encryptionKey = encryptionSecret
   ? crypto.scryptSync(encryptionSecret, "zyvox-session-auth-v1", 32)
@@ -55,12 +50,6 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS session_auth (
       session_id VARCHAR(64) PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
       payload TEXT NOT NULL,
-,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS session_auth (
-      session_id VARCHAR(64) PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
-      payload TEXT NOT NULL,
       iv TEXT NOT NULL,
       auth_tag TEXT NOT NULL,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -89,64 +78,6 @@ function decryptText(payload) {
   const decipher = crypto.createDecipheriv("aes-256-gcm", key, raw.subarray(0, 12));
   decipher.setAuthTag(raw.subarray(12, 28));
   return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8");
-}
-
-async function backupAuth(session) {
-  if (!pool || !sessionEncryptionKey) return;
-  try {
-    const files = {};
-    for (const entry of await fs.readdir(session.authPath, { withFileTypes: true })) {
-      if (entry.isFile()) files[entry.name] = (await fs.readFile(path.join(session.authPath, entry.name))).toString("base64");
-    }
-    const payload = encryptText(JSON.stringify(files));
-    await pool.query(
-      'INSERT INTO session_auth (session_id, payload, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (session_id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()',
-      [session.id, payload]
-    );
-  } catch (error) {
-    logger.error({ err: error, sessionId: session.id }, "Auth backup failed");
-  }
-}
-
-async function restoreAuth(session) {
-  if (!pool || !sessionEncryptionKey) return false;
-  const { rows } = await pool.query("SELECT payload FROM session_auth WHERE session_id = $1", [session.id]);
-  if (!rows.length) return false;
-  try {
-    const files = JSON.parse(decryptText(rows[0].payload));
-    await fs.mkdir(session.authPath, { recursive: true });
-    for (const [name, data] of Object.entries(files)) await fs.writeFile(path.join(session.authPath, name), Buffer.from(data, "base64"));
-    return true;
-  } catch (error) {
-    logger.error({ err: error, sessionId: session.id }, "Auth restore failed");
-    return false;
-  }
-}
-
-function encryptAuth(payload) {
-  if (!encryptionKey) throw new Error("SESSION_ENCRYPTION_KEY is not configured");
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", encryptionKey, iv);
-  const encrypted = Buffer.concat([cipher.update(payload, "utf8"), cipher.final()]);
-  return {
-    payload: encrypted.toString("base64"),
-    iv: iv.toString("base64"),
-    authTag: cipher.getAuthTag().toString("base64")
-  };
-}
-
-function decryptAuth(row) {
-  if (!encryptionKey) throw new Error("SESSION_ENCRYPTION_KEY is not configured");
-  const decipher = crypto.createDecipheriv(
-    "aes-256-gcm",
-    encryptionKey,
-    Buffer.from(row.iv, "base64")
-  );
-  decipher.setAuthTag(Buffer.from(row.auth_tag, "base64"));
-  return Buffer.concat([
-    decipher.update(Buffer.from(row.payload, "base64")),
-    decipher.final()
-  ]).toString("utf8");
 }
 
 async function snapshotAuth(session) {
@@ -238,7 +169,7 @@ async function createSocket(session) {
   await restoreAuth(session);
 
   const { state, saveCreds } = await useMultiFileAuthState(authPath);
-  const saveAndBackupCreds = async () => { await saveCreds(); await backupAuth(session); };
+  const saveAndBackupCreds = async () => { await saveCreds(); await snapshotAuth(session); };
   let version;
   try {
     ({ version } = await fetchLatestBaileysVersion());
@@ -257,7 +188,7 @@ async function createSocket(session) {
   session.status = "connecting";
   await saveSession(session);
   sock.ev.on("creds.update", saveAndBackupCreds);
-  await backupAuth(session);
+  await snapshotAuth(session);
 
   sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
     if (qr) {
