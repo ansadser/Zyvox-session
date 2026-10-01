@@ -24,6 +24,11 @@ const pool = process.env.DATABASE_URL
   ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } })
   : null;
 
+const encryptionSecret = process.env.SESSION_ENCRYPTION_KEY || "";
+const encryptionKey = encryptionSecret
+  ? crypto.scryptSync(encryptionSecret, "zyvox-session-auth-v1", 32)
+  : null;
+
 app.use(cors({
   origin: process.env.CORS_ORIGIN || "*",
   methods: ["GET", "POST", "DELETE"],
@@ -50,6 +55,14 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS session_auth (
       session_id VARCHAR(64) PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
       payload TEXT NOT NULL,
+,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS session_auth (
+      session_id VARCHAR(64) PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+      payload TEXT NOT NULL,
+      iv TEXT NOT NULL,
+      auth_tag TEXT NOT NULL,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
@@ -108,6 +121,80 @@ async function restoreAuth(session) {
     logger.error({ err: error, sessionId: session.id }, "Auth restore failed");
     return false;
   }
+}
+
+function encryptAuth(payload) {
+  if (!encryptionKey) throw new Error("SESSION_ENCRYPTION_KEY is not configured");
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", encryptionKey, iv);
+  const encrypted = Buffer.concat([cipher.update(payload, "utf8"), cipher.final()]);
+  return {
+    payload: encrypted.toString("base64"),
+    iv: iv.toString("base64"),
+    authTag: cipher.getAuthTag().toString("base64")
+  };
+}
+
+function decryptAuth(row) {
+  if (!encryptionKey) throw new Error("SESSION_ENCRYPTION_KEY is not configured");
+  const decipher = crypto.createDecipheriv(
+    "aes-256-gcm",
+    encryptionKey,
+    Buffer.from(row.iv, "base64")
+  );
+  decipher.setAuthTag(Buffer.from(row.auth_tag, "base64"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(row.payload, "base64")),
+    decipher.final()
+  ]).toString("utf8");
+}
+
+async function snapshotAuth(session) {
+  if (!pool || !encryptionKey) return;
+  const authPath = path.join(sessionsDir, session.id);
+  const files = {};
+  let entries = [];
+  try {
+    entries = await fs.readdir(authPath, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const file = await fs.readFile(path.join(authPath, entry.name));
+    files[entry.name] = file.toString("base64");
+  }
+
+  if (!Object.keys(files).length) return;
+
+  const encrypted = encryptAuth(JSON.stringify(files));
+  await pool.query(
+    `INSERT INTO session_auth (session_id, payload, iv, auth_tag, updated_at)
+     VALUES ($1, $2, $3, $4, NOW())
+     ON CONFLICT (session_id)
+     DO UPDATE SET payload = EXCLUDED.payload, iv = EXCLUDED.iv,
+                   auth_tag = EXCLUDED.auth_tag, updated_at = NOW()`,
+    [session.id, encrypted.payload, encrypted.iv, encrypted.authTag]
+  );
+}
+
+async function restoreAuth(session) {
+  if (!pool || !encryptionKey) return false;
+  const { rows } = await pool.query(
+    "SELECT payload, iv, auth_tag FROM session_auth WHERE session_id = $1",
+    [session.id]
+  );
+  if (!rows.length) return false;
+
+  const files = JSON.parse(decryptAuth(rows[0]));
+  const authPath = path.join(sessionsDir, session.id);
+  await fs.mkdir(authPath, { recursive: true });
+
+  for (const [name, base64] of Object.entries(files)) {
+    await fs.writeFile(path.join(authPath, name), Buffer.from(base64, "base64"));
+  }
+  return true;
 }
 
 async function saveSession(session) {
