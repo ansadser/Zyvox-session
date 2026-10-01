@@ -143,7 +143,7 @@ function App() {
                 ) : session.qr ? (
                   <>
                     <div className="qr-frame">
-                      <img src={session.qr} alt="WhatsApp QR code" />
+                      <img src={API + "/api/sessions/" + session.sessionId + "/qr"} alt="WhatsApp QR code" />
                     </div>
                     <div className="scan-help"><span /> Open WhatsApp → Linked devices → Link a device</div>
                   </>
