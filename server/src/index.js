@@ -47,11 +47,16 @@ async function initDb() {
 
     CREATE TABLE IF NOT EXISTS session_auth (
       session_id VARCHAR(64) PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
-      payload TEXT NOT NULL,
-      iv TEXT NOT NULL,
-      auth_tag TEXT NOT NULL,
+      payload TEXT,
+      iv TEXT,
+      auth_tag TEXT,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
+    );
+
+    ALTER TABLE session_auth ADD COLUMN IF NOT EXISTS payload TEXT;
+    ALTER TABLE session_auth ADD COLUMN IF NOT EXISTS iv TEXT;
+    ALTER TABLE session_auth ADD COLUMN IF NOT EXISTS auth_tag TEXT;
+    ALTER TABLE session_auth ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
   `);
 }
 
