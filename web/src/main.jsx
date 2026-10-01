@@ -1,0 +1,2 @@
+import React from "react"; import {createRoot} from "react-dom/client"; import "./styles.css";
+function App(){return <main className="page"><section className="card"><div className="brand">ZYVOX</div><h1>WhatsApp Session</h1><p>Connect an authorized WhatsApp account with QR or pairing code.</p><div className="actions"><button>Generate QR</button><button className="secondary">Pairing Code</button></div><div className="status">● Ready to connect</div></section></main>}; createRoot(document.getElementById("root")).render(<App/>);

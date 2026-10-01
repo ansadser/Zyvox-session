@@ -1,0 +1,10 @@
+node_modules/
+.env
+.env.*
+!.env.example
+sessions/
+server/sessions/
+dist/
+web/dist/
+*.log
+.DS_Store
