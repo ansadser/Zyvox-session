@@ -224,10 +224,12 @@ app.get("/api/sessions/:id/qr", (req, res) => {
   if (!session) return res.status(404).json({ error: "Session not found" });
   if (!session.qr) return res.status(404).json({ error: "QR not available", status: session.status });
 
-  const match = session.qr.match(/^data:image\\/png;base64,(.+)$/);
-  if (!match) return res.status(500).json({ error: "Invalid QR data" });
+  const prefix = "data:image/png;base64,";
+  if (!session.qr.startsWith(prefix)) {
+    return res.status(500).json({ error: "Invalid QR data" });
+  }
 
-  res.type("png").send(Buffer.from(match[1], "base64"));
+  res.type("png").send(Buffer.from(session.qr.slice(prefix.length), "base64"));
 });
 
 app.post("/api/sessions/:id/pair", async (req, res) => {
