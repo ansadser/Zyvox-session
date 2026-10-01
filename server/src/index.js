@@ -19,6 +19,7 @@ const port = Number(process.env.PORT || 3000);
 const sessionsDir = path.resolve(process.env.SESSIONS_DIR || "./sessions");
 const logger = P({ level: process.env.LOG_LEVEL || "info" });
 const sessions = new Map();
+const sessionEncryptionKey = process.env.SESSION_ENCRYPTION_KEY || "";
 const pool = process.env.DATABASE_URL
   ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } })
   : null;
@@ -44,8 +45,69 @@ async function initDb() {
       status VARCHAR(32) NOT NULL DEFAULT 'starting',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS session_auth (
+      session_id VARCHAR(64) PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+      payload TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+}
+
+function encryptionKey() {
+  if (!sessionEncryptionKey) return null;
+  return crypto.createHash("sha256").update(sessionEncryptionKey).digest();
+}
+
+function encryptText(text) {
+  const key = encryptionKey();
+  if (!key) return null;
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const encrypted = Buffer.concat([cipher.update(text, "utf8"), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), encrypted]).toString("base64");
+}
+
+function decryptText(payload) {
+  const key = encryptionKey();
+  if (!key) return null;
+  const raw = Buffer.from(payload, "base64");
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, raw.subarray(0, 12));
+  decipher.setAuthTag(raw.subarray(12, 28));
+  return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8");
+}
+
+async function backupAuth(session) {
+  if (!pool || !sessionEncryptionKey) return;
+  try {
+    const files = {};
+    for (const entry of await fs.readdir(session.authPath, { withFileTypes: true })) {
+      if (entry.isFile()) files[entry.name] = (await fs.readFile(path.join(session.authPath, entry.name))).toString("base64");
+    }
+    const payload = encryptText(JSON.stringify(files));
+    await pool.query(
+      'INSERT INTO session_auth (session_id, payload, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (session_id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()',
+      [session.id, payload]
+    );
+  } catch (error) {
+    logger.error({ err: error, sessionId: session.id }, "Auth backup failed");
+  }
+}
+
+async function restoreAuth(session) {
+  if (!pool || !sessionEncryptionKey) return false;
+  const { rows } = await pool.query("SELECT payload FROM session_auth WHERE session_id = $1", [session.id]);
+  if (!rows.length) return false;
+  try {
+    const files = JSON.parse(decryptText(rows[0].payload));
+    await fs.mkdir(session.authPath, { recursive: true });
+    for (const [name, data] of Object.entries(files)) await fs.writeFile(path.join(session.authPath, name), Buffer.from(data, "base64"));
+    return true;
+  } catch (error) {
+    logger.error({ err: error, sessionId: session.id }, "Auth restore failed");
+    return false;
+  }
 }
 
 async function saveSession(session) {
@@ -84,9 +146,12 @@ function publicSession(session) {
 
 async function createSocket(session) {
   const authPath = path.join(sessionsDir, session.id);
+  session.authPath = authPath;
   await fs.mkdir(authPath, { recursive: true });
+  await restoreAuth(session);
 
   const { state, saveCreds } = await useMultiFileAuthState(authPath);
+  const saveAndBackupCreds = async () => { await saveCreds(); await backupAuth(session); };
   let version;
   try {
     ({ version } = await fetchLatestBaileysVersion());
@@ -104,7 +169,8 @@ async function createSocket(session) {
   session.sock = sock;
   session.status = "connecting";
   await saveSession(session);
-  sock.ev.on("creds.update", saveCreds);
+  sock.ev.on("creds.update", saveAndBackupCreds);
+  await backupAuth(session);
 
   sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
     if (qr) {
@@ -160,7 +226,8 @@ async function restoreSessions() {
       pairingCode: null,
       phone: row.phone,
       error: null,
-      sock: null
+      sock: null,
+      authPath: path.join(sessionsDir, row.session_id)
     };
     sessions.set(session.id, session);
     createSocket(session).catch(async (error) => {
@@ -268,6 +335,7 @@ app.delete("/api/sessions/:id", async (req, res) => {
   try { session.sock?.end(undefined); } catch {}
   sessions.delete(session.id);
   await deleteSessionRecord(session.id);
+  if (pool) await pool.query("DELETE FROM session_auth WHERE session_id = $1", [session.id]);
   await fs.rm(path.join(sessionsDir, session.id), { recursive: true, force: true });
   res.json({ ok: true });
 });
