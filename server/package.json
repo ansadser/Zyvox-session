@@ -12,6 +12,7 @@
     "cors": "latest",
     "express": "latest",
     "pino": "latest",
+    "pg": "latest",
     "qrcode": "latest"
   }
 }

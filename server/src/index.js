@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import fs from "node:fs/promises";
 import P from "pino";
+import pg from "pg";
 import makeWASocket, {
   Browsers,
   DisconnectReason,
@@ -12,11 +13,15 @@ import makeWASocket, {
   useMultiFileAuthState
 } from "@whiskeysockets/baileys";
 
+const { Pool } = pg;
 const app = express();
 const port = Number(process.env.PORT || 3000);
 const sessionsDir = path.resolve(process.env.SESSIONS_DIR || "./sessions");
 const logger = P({ level: process.env.LOG_LEVEL || "info" });
 const sessions = new Map();
+const pool = process.env.DATABASE_URL
+  ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } })
+  : null;
 
 app.use(cors({
   origin: process.env.CORS_ORIGIN || "*",
@@ -26,6 +31,37 @@ app.use(cors({
 app.use(express.json());
 
 await fs.mkdir(sessionsDir, { recursive: true });
+
+async function initDb() {
+  if (!pool) {
+    logger.warn("DATABASE_URL is not configured; sessions will only live in memory.");
+    return;
+  }
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      session_id VARCHAR(64) PRIMARY KEY,
+      phone VARCHAR(20),
+      status VARCHAR(32) NOT NULL DEFAULT 'starting',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
+async function saveSession(session) {
+  if (!pool) return;
+  await pool.query(
+    `INSERT INTO sessions (session_id, phone, status, updated_at)
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (session_id)
+     DO UPDATE SET phone = EXCLUDED.phone, status = EXCLUDED.status, updated_at = NOW()`,
+    [session.id, session.phone || null, session.status]
+  );
+}
+
+async function deleteSessionRecord(id) {
+  if (pool) await pool.query("DELETE FROM sessions WHERE session_id = $1", [id]);
+}
 
 function newSessionId() {
   return crypto.randomBytes(12).toString("hex");
@@ -39,7 +75,7 @@ function publicSession(session) {
   return {
     sessionId: session.id,
     status: session.status,
-    qr: session.qr ? true : false,
+    qr: Boolean(session.qr),
     pairingCode: session.pairingCode || null,
     phone: session.phone || null,
     error: session.error || null
@@ -54,9 +90,7 @@ async function createSocket(session) {
   let version;
   try {
     ({ version } = await fetchLatestBaileysVersion());
-  } catch {
-    version = undefined;
-  }
+  } catch {}
 
   const sock = makeWASocket({
     auth: state,
@@ -69,12 +103,14 @@ async function createSocket(session) {
 
   session.sock = sock;
   session.status = "connecting";
+  await saveSession(session);
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
     if (qr) {
       session.qr = await QRCode.toDataURL(qr, { width: 320, margin: 2 });
       session.status = "qr";
+      await saveSession(session);
     }
 
     if (connection === "open") {
@@ -82,6 +118,7 @@ async function createSocket(session) {
       session.qr = null;
       session.pairingCode = null;
       session.error = null;
+      await saveSession(session);
     }
 
     if (connection === "close") {
@@ -93,20 +130,45 @@ async function createSocket(session) {
 
       if (loggedOut) {
         session.status = "logged_out";
+        await saveSession(session);
         return;
       }
 
       session.status = "reconnecting";
+      await saveSession(session);
       setTimeout(() => {
-        createSocket(session).catch((error) => {
+        createSocket(session).catch(async (error) => {
           session.status = "error";
           session.error = error.message;
+          await saveSession(session);
         });
       }, 1500);
     }
   });
 
   return sock;
+}
+
+async function restoreSessions() {
+  if (!pool) return;
+  const { rows } = await pool.query("SELECT session_id, phone, status FROM sessions ORDER BY created_at ASC");
+  for (const row of rows) {
+    const session = {
+      id: row.session_id,
+      status: row.status,
+      qr: null,
+      pairingCode: null,
+      phone: row.phone,
+      error: null,
+      sock: null
+    };
+    sessions.set(session.id, session);
+    createSocket(session).catch(async (error) => {
+      session.status = "error";
+      session.error = error.message;
+      await saveSession(session);
+    });
+  }
 }
 
 app.get("/", (_req, res) => {
@@ -117,8 +179,13 @@ app.get("/", (_req, res) => {
   });
 });
 
-app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, service: "zyvox-session" });
+app.get("/api/health", async (_req, res) => {
+  res.json({
+    ok: true,
+    service: "zyvox-session",
+    database: Boolean(pool),
+    sessions: sessions.size
+  });
 });
 
 app.post("/api/sessions", async (_req, res) => {
@@ -133,6 +200,7 @@ app.post("/api/sessions", async (_req, res) => {
     sock: null
   };
   sessions.set(id, session);
+  await saveSession(session);
 
   try {
     await createSocket(session);
@@ -140,6 +208,7 @@ app.post("/api/sessions", async (_req, res) => {
   } catch (error) {
     session.status = "error";
     session.error = error.message;
+    await saveSession(session);
     res.status(500).json(publicSession(session));
   }
 });
@@ -176,10 +245,12 @@ app.post("/api/sessions/:id/pair", async (req, res) => {
     session.phone = phone;
     session.pairingCode = code;
     session.status = "pairing";
+    await saveSession(session);
     res.json({ sessionId: session.id, phone, pairingCode: code, status: session.status });
   } catch (error) {
     session.status = "error";
     session.error = error.message;
+    await saveSession(session);
     res.status(500).json({ error: error.message });
   }
 });
@@ -188,13 +259,14 @@ app.delete("/api/sessions/:id", async (req, res) => {
   const session = sessions.get(req.params.id);
   if (!session) return res.status(404).json({ error: "Session not found" });
 
-  try {
-    session.sock?.end(undefined);
-  } catch {}
-
+  try { session.sock?.end(undefined); } catch {}
   sessions.delete(session.id);
+  await deleteSessionRecord(session.id);
   await fs.rm(path.join(sessionsDir, session.id), { recursive: true, force: true });
   res.json({ ok: true });
 });
+
+await initDb();
+await restoreSessions();
 
 app.listen(port, () => logger.info({ port }, "Zyvox server started"));
