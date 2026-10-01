@@ -12,6 +12,8 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   useMultiFileAuthState
 } from "@whiskeysockets/baileys";
+import { createBotDb } from "./bot/db.js";
+import { handleMessage } from "./bot/engine.js";
 
 const { Pool } = pg;
 const app = express();
@@ -21,6 +23,7 @@ const logger = P({ level: process.env.LOG_LEVEL || "info" });
 const sessions = new Map();
 const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false }) : null;
 const sessionEncryptionKey = process.env.SESSION_ENCRYPTION_KEY || "";
+const botDb = createBotDb(pool);
 
 app.use(cors({
   origin: process.env.CORS_ORIGIN || "*",
@@ -202,7 +205,7 @@ async function createSocket(session) {
   session.sock = sock;
   session.status = "connecting";
   await saveSession(session);
-  sock.ev.on("creds.update", saveAndBackupCreds);
+  sock.ev.on("creds.update", saveAndBackupCreds);\n  sock.ev.on("messages.upsert", async ({ messages, type }) => {\n    if (type !== "notify") return;\n    for (const msg of messages) {\n      try {\n        if (msg.key?.fromMe && msg.key?.remoteJid !== session.ownerJid) continue;\n        await handleMessage({ sock, session, msg, db: botDb });\n      } catch (error) {\n        logger.error({ sessionId: session.id, error: error.message }, "Bot command failed");\n      }\n    }\n  });
   await snapshotAuth(session);
 
   sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
