@@ -58,63 +58,146 @@ function App() {
   };
 
   const copy = async (value) => {
-    await navigator.clipboard.writeText(value);
-    setMessage("Copied.");
-    setTimeout(() => setMessage(""), 1200);
+    try {
+      await navigator.clipboard.writeText(value);
+      setMessage("Copied to clipboard.");
+      setTimeout(() => setMessage(""), 1200);
+    } catch {
+      setMessage("Copy failed. Please copy it manually.");
+    }
   };
+
+  const deleteSession = async () => {
+    if (!session) return;
+    setLoading(true);
+    try {
+      await fetch(API + "/api/sessions/" + session.sessionId, { method: "DELETE" });
+      setSession(null);
+      setPhone("");
+      setMode("qr");
+      setMessage("Session closed.");
+    } catch (e) {
+      setMessage("Could not close session.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const statusLabel = session?.status?.replace("_", " ") || "";
 
   return (
     <main className="page">
+      <div className="glow glow-one" />
+      <div className="glow glow-two" />
+
       <section className="card">
-        <div className="brand">ZYVOX</div>
-        <h1>WhatsApp Session</h1>
-        <p>Connect an authorized WhatsApp account using QR or a pairing code.</p>
+        <header className="header">
+          <div className="brand-mark">Z</div>
+          <div>
+            <div className="brand">ZYVOX</div>
+            <div className="eyebrow">SESSION CENTER</div>
+          </div>
+          <div className="secure-pill"><span /> Secure</div>
+        </header>
+
+        <div className="hero">
+          <div className="badge">WHATSAPP CONNECT</div>
+          <h1>Connect your<br /><span>WhatsApp session.</span></h1>
+          <p>Link an authorized account with a secure QR scan or pairing code.</p>
+        </div>
 
         {!session ? (
           <button className="primary full" onClick={createSession} disabled={loading}>
-            {loading ? "Starting…" : "Start Session"}
+            <span>{loading ? "Starting session…" : "Start New Session"}</span>
+            {!loading && <b>→</b>}
           </button>
         ) : (
           <>
+            <div className="session-top">
+              <div>
+                <div className="section-label">ACTIVE SESSION</div>
+                <div className="mini-id">{session.sessionId.slice(0, 12)}…</div>
+              </div>
+              <div className={"status-pill " + session.status}>
+                <span /> {statusLabel}
+              </div>
+            </div>
+
             <div className="tabs">
-              <button className={mode === "qr" ? "tab active" : "tab"} onClick={() => setMode("qr")}>QR Code</button>
-              <button className={mode === "pair" ? "tab active" : "tab"} onClick={() => setMode("pair")}>Pairing Code</button>
+              <button className={mode === "qr" ? "tab active" : "tab"} onClick={() => setMode("qr")}>
+                <span>⌁</span> QR Code
+              </button>
+              <button className={mode === "pair" ? "tab active" : "tab"} onClick={() => setMode("pair")}>
+                <span>⌘</span> Pairing Code
+              </button>
             </div>
 
             {mode === "qr" && (
-              <div className="qrbox">
+              <div className="qr-panel">
                 {session.status === "connected" ? (
-                  <div className="connected">✓ WhatsApp Connected</div>
+                  <div className="connected-state">
+                    <div className="success-icon">✓</div>
+                    <strong>WhatsApp Connected</strong>
+                    <span>Your session is active and ready.</span>
+                  </div>
                 ) : session.qr ? (
-                  <img src={API + "/api/sessions/" + session.sessionId + "/qr"} alt="WhatsApp QR" />
+                  <>
+                    <div className="qr-frame">
+                      <img src={session.qr} alt="WhatsApp QR code" />
+                    </div>
+                    <div className="scan-help"><span /> Open WhatsApp → Linked devices → Link a device</div>
+                  </>
                 ) : (
-                  <div className="loader">Waiting for QR…</div>
+                  <div className="waiting-state">
+                    <div className="spinner" />
+                    <strong>Preparing your QR code…</strong>
+                    <span>Keep this page open.</span>
+                  </div>
                 )}
               </div>
             )}
 
             {mode === "pair" && (
-              <div className="pairbox">
-                <label>Phone number with country code</label>
-                <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="919876543210" inputMode="numeric" />
-                <button className="primary full" onClick={pair} disabled={loading}>Get Pairing Code</button>
+              <div className="pair-panel">
+                <label>PHONE NUMBER</label>
+                <div className="input-wrap">
+                  <span>+</span>
+                  <input
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value.replace(/\D/g, ""))}
+                    placeholder="919876543210"
+                    inputMode="numeric"
+                    maxLength={15}
+                  />
+                </div>
+                <small>Include your country code, without spaces or symbols.</small>
+                <button className="primary full" onClick={pair} disabled={loading || !phone.trim()}>
+                  {loading ? "Generating…" : "Get Pairing Code"} <b>→</b>
+                </button>
                 {session.pairingCode && (
-                  <div className="code" onClick={() => copy(session.pairingCode)}>{session.pairingCode}</div>
+                  <button className="code" onClick={() => copy(session.pairingCode)} title="Copy pairing code">
+                    {session.pairingCode}
+                  </button>
                 )}
               </div>
             )}
 
-            <div className={"status " + session.status}>
-              <span>●</span> {session.status.replace("_", " ")}
+            <div className="session-id">
+              <div>
+                <span>SESSION ID</span>
+                <strong>{session.sessionId}</strong>
+              </div>
+              <button onClick={() => copy(session.sessionId)}>Copy</button>
             </div>
-            <div className="session">
-              <span>Session ID</span>
-              <button onClick={() => copy(session.sessionId)}>{session.sessionId} · Copy</button>
-            </div>
+
+            <button className="close-session" onClick={deleteSession} disabled={loading}>
+              Close session
+            </button>
           </>
         )}
 
         {message && <div className="message">{message}</div>}
+        <footer>Use only with WhatsApp accounts you own or are authorized to connect.</footer>
       </section>
     </main>
   );
