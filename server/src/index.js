@@ -205,7 +205,18 @@ async function createSocket(session) {
   session.sock = sock;
   session.status = "connecting";
   await saveSession(session);
-  sock.ev.on("creds.update", saveAndBackupCreds);\n  sock.ev.on("messages.upsert", async ({ messages, type }) => {\n    if (type !== "notify") return;\n    for (const msg of messages) {\n      try {\n        if (msg.key?.fromMe && msg.key?.remoteJid !== session.ownerJid) continue;\n        await handleMessage({ sock, session, msg, db: botDb });\n      } catch (error) {\n        logger.error({ sessionId: session.id, error: error.message }, "Bot command failed");\n      }\n    }\n  });
+  sock.ev.on("creds.update", saveAndBackupCreds);
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    if (type !== "notify") return;
+    for (const msg of messages) {
+      try {
+        if (msg.key?.fromMe && msg.key?.remoteJid !== session.ownerJid) continue;
+        await handleMessage({ sock, session, msg, db: botDb });
+      } catch (error) {
+        logger.error({ sessionId: session.id, error: error.message }, "Bot command failed");
+      }
+    }
+  });
   await snapshotAuth(session);
 
   sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
